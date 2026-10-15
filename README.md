@@ -12,6 +12,10 @@ Paste a DOI, highlight the authors that matter, and save the result as an image.
 - Light and dark themes; card and 1200×630 social layouts
 - Export PNG or JPEG at 1x to 3x, copy the image, copy the author list as rich text (highlights in bold), copy a share link
 - The URL always reproduces the current paper, highlights and look
+- Full affiliations (the complete text from the paper, not just institution names)
+- Publisher and journal logos, loaded after the card appears
+- Impact factor and quartile you type in, shown as chips on the card
+- Highlight legend can be switched off
 - Long author lists (over 24) collapse to the first 8, the last 4, and anyone highlighted
 
 ## Run locally
@@ -32,6 +36,14 @@ gh repo create byline --public --source=. --push
 
 Then import the repo at https://vercel.com/new (framework preset: Next.js) and add the environment
 variable `CONTACT_EMAIL`. Every push to `main` deploys to production and every pull request gets a preview URL.
+
+## Logos, impact factor and quartile
+
+- **Logos:** the publisher logo comes from OpenAlex (Wikimedia Commons), falling back to the site icon. Journals rarely have
+  a logo in open data, so the journal logo is the icon of its website. Logos are embedded as data URIs so image export never fails on CORS.
+  If none is found, nothing is shown.
+- **Impact factor and quartile:** these are licensed by Clarivate and have no free API, so you type them in the "Journal" panel.
+  They appear as chips on the card and are included in the share link.
 
 ## How it works
 

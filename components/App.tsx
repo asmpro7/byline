@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toBlob, toJpeg, toPng } from "html-to-image";
-import type { Paper } from "@/lib/types";
+import type { JournalInfo, Paper } from "@/lib/types";
 import { parseDoi } from "@/lib/doi";
 import { matchesName } from "@/lib/nameMatch";
 import PaperCard, { type CardOpts } from "./PaperCard";
@@ -63,6 +63,8 @@ export default function App() {
     style: "marker",
     affiliations: true,
     meta: true,
+    logos: true,
+    legend: true,
     labels: ["Highlighted", "Collaborators"],
   });
   const [scale, setScale] = useState(2);
@@ -71,6 +73,10 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [recent, setRecent] = useState<{ doi: string; title: string }[]>([]);
   const cardRef = useRef<HTMLDivElement>(null);
+  const [journal, setJournal] = useState<JournalInfo | null>(null);
+  const [ifOverride, setIfOverride] = useState("");
+  const [qOverride, setQOverride] = useState("");
+  const reqId = useRef(0);
 
   const flash = (msg: string) => {
     setToast(msg);
@@ -91,6 +97,19 @@ export default function App() {
       if (!res.ok) throw new Error(data.error ?? "Lookup failed. Try again in a moment.");
       setPaper(data);
       setMarks(initial ?? {});
+      // Journal details (metrics, logos) load after the card is already on screen.
+      const id = ++reqId.current;
+      setJournal(null);
+      const jp = new URLSearchParams();
+      if (data.sourceId) jp.set("source", data.sourceId);
+      if (data.issn) jp.set("issn", data.issn);
+      if (data.publisher) jp.set("publisher", data.publisher);
+      if ([...jp].length) {
+        fetch(`/api/journal?${jp}`)
+          .then((r) => r.json())
+          .then((j) => id === reqId.current && setJournal(j))
+          .catch(() => {});
+      }
       setFilter("");
       setRecent((r) => {
         const next = [{ doi: data.doi, title: data.title }, ...r.filter((x) => x.doi !== data.doi)].slice(0, 5);
@@ -128,6 +147,8 @@ export default function App() {
         const [id, g] = t.split(".");
         if (g === "1" || g === "2") m[+id] = +g as 1 | 2;
       });
+      setIfOverride(p.get("if") ?? "");
+      setQOverride(p.get("q") ?? "");
       load(doi, m);
     }
   }, [load]);
@@ -138,8 +159,10 @@ export default function App() {
     const p = new URLSearchParams({ doi: paper.doi, theme: opts.theme, layout: opts.layout, style: opts.style });
     const hl = Object.entries(marks).map(([i, g]) => `${i}.${g}`).join(",");
     if (hl) p.set("hl", hl);
+    if (ifOverride.trim()) p.set("if", ifOverride.trim());
+    if (qOverride.trim()) p.set("q", qOverride.trim());
     history.replaceState(null, "", `?${p}`);
-  }, [paper, marks, opts.theme, opts.layout, opts.style]);
+  }, [paper, marks, opts.theme, opts.layout, opts.style, ifOverride, qOverride]);
 
   const toggle = (id: number) =>
     setMarks((m) => {
@@ -222,6 +245,13 @@ export default function App() {
       flash("Copy failed.");
     }
   }
+
+  // Impact factor and quartile are licensed data, so they are typed in rather than looked up.
+  const qText = qOverride.trim().toUpperCase();
+  const metrics = {
+    impact: ifOverride.trim() ? `Impact factor ${ifOverride.trim()}` : undefined,
+    q: qText ? (/^[1-4]$/.test(qText) ? `Q${qText}` : qText) : undefined,
+  };
 
   const go = (doi: string) => {
     setInput(doi);
@@ -347,12 +377,29 @@ export default function App() {
                   options={[["card", "Card"], ["social", "Social 1200×630"]]} />
                 <label className="check">
                   <input type="checkbox" checked={opts.affiliations} onChange={(e) => setOpts((o) => ({ ...o, affiliations: e.target.checked }))} />
-                  Show affiliations
+                  Show full affiliations
                 </label>
                 <label className="check">
                   <input type="checkbox" checked={opts.meta} onChange={(e) => setOpts((o) => ({ ...o, meta: e.target.checked }))} />
                   Show journal, year and DOI
                 </label>
+                <label className="check">
+                  <input type="checkbox" checked={opts.legend} onChange={(e) => setOpts((o) => ({ ...o, legend: e.target.checked }))} />
+                  Show highlight legend
+                </label>
+              </div>
+            </div>
+
+            <div className="panel">
+              <h3>Journal</h3>
+              <div className="stack tight">
+                <label className="check">
+                  <input type="checkbox" checked={opts.logos} onChange={(e) => setOpts((o) => ({ ...o, logos: e.target.checked }))} />
+                  Show publisher and journal logos
+                </label>
+                <input type="text" inputMode="decimal" aria-label="Impact factor" placeholder="Impact factor, e.g. 64.8" value={ifOverride} onChange={(e) => setIfOverride(e.target.value)} />
+                <input type="text" aria-label="Quartile" placeholder="Quartile, e.g. Q1" maxLength={6} value={qOverride} onChange={(e) => setQOverride(e.target.value)} />
+                <p className="hint">Leave a field empty to hide it on the card.</p>
               </div>
             </div>
 
@@ -374,7 +421,7 @@ export default function App() {
 
           <section>
             <div className="stage">
-              <PaperCard paper={paper} marks={marks} opts={opts} innerRef={cardRef} />
+              <PaperCard paper={paper} marks={marks} opts={opts} journal={journal} metrics={metrics} innerRef={cardRef} />
             </div>
             <div className="bar">
               <button className="primary" onClick={() => download("png")}>Download PNG</button>

@@ -7,7 +7,7 @@ type Raw = { given?: string; family?: string; name?: string; orcid?: string; aff
 
 const mailto = process.env.CONTACT_EMAIL;
 
-async function getJson(url: string): Promise<J | null> {
+export async function getJson(url: string): Promise<J | null> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 8000);
   try {
@@ -24,6 +24,8 @@ async function getJson(url: string): Promise<J | null> {
   }
 }
 
+const len = (x: string[] = []) => x.join("").length;
+const fuller = (a?: string[], b?: string[]) => (len(b) > len(a) ? b : a);
 const key = (family = "", given = "") => `${norm(family)}|${norm(given)[0] ?? ""}`;
 const clean = (s = "") => s.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
 
@@ -61,7 +63,10 @@ export async function fetchPaper(doi: string): Promise<Paper | null> {
   const oaRaw: Raw[] = (oa?.authorships ?? []).map((a: J) => ({
     ...splitName(a.author?.display_name ?? ""),
     orcid: a.author?.orcid,
-    affiliations: (a.institutions ?? []).map((i: J) => i.display_name),
+    // Raw strings are the full text as printed on the paper; institution names are only a fallback.
+    affiliations: a.raw_affiliation_strings?.length
+      ? a.raw_affiliation_strings
+      : (a.institutions ?? []).map((i: J) => i.display_name),
     corr: a.is_corresponding,
   }));
 
@@ -87,7 +92,7 @@ export async function fetchPaper(doi: string): Promise<Paper | null> {
       if (j < 0) return a;
       used.add(j);
       const b = oaRaw[j];
-      return { ...a, orcid: a.orcid ?? b.orcid, affiliations: a.affiliations?.length ? a.affiliations : b.affiliations, corr: b.corr };
+      return { ...a, orcid: a.orcid ?? b.orcid, affiliations: fuller(a.affiliations, b.affiliations), corr: b.corr };
     });
     if (!raw.length) raw = oaRaw;
     journal = clean(m["container-title"]?.[0]) || undefined;
@@ -126,5 +131,8 @@ export async function fetchPaper(doi: string): Promise<Paper | null> {
     citedByCount: oa?.cited_by_count ?? m?.["is-referenced-by-count"],
     url: `https://doi.org/${doi}`,
     source,
+    sourceId: oa?.primary_location?.source?.id?.split("/").pop(),
+    issn: m?.ISSN?.[0] ?? oa?.primary_location?.source?.issn_l ?? undefined,
+    publisher: clean(m?.publisher) || undefined,
   };
 }

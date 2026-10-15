@@ -18,4 +18,13 @@ export type Paper = {
   citedByCount?: number;
   url: string;
   source: "crossref" | "openalex" | "datacite";
+  sourceId?: string; // OpenAlex source id, used to look up journal details
+  issn?: string;
+  publisher?: string;
+};
+
+export type JournalInfo = {
+  name?: string;
+  logo?: string; // data URI, so image export never hits CORS
+  publisher?: { name?: string; logo?: string };
 };
