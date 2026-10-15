@@ -7,7 +7,36 @@ import { parseDoi } from "@/lib/doi";
 import { matchesName } from "@/lib/nameMatch";
 import PaperCard, { type CardOpts } from "./PaperCard";
 
-type Marks = Record<number, 1 | 2>;
+type G = 1 | 2 | 3;
+type Marks = Record<number, G>;
+type BoolKey = Exclude<keyof CardOpts, "theme" | "layout" | "style" | "labels">;
+
+class ApiError extends Error {}
+
+const GROUPS = [1, 2, 3] as const;
+const STYLES = ["marker", "bold", "underline", "box"];
+const DEFAULTS: CardOpts = {
+  theme: "light",
+  layout: "card",
+  style: "marker",
+  affiliations: true,
+  pubLogo: true,
+  jourLogo: true,
+  journalName: true,
+  doi: true,
+  citations: true,
+  legend: true,
+  labels: ["Highlighted", "Collaborators", "Lab members"],
+};
+const SHOW: [BoolKey, string][] = [
+  ["affiliations", "Full affiliations"],
+  ["pubLogo", "Publisher logo"],
+  ["jourLogo", "Journal logo"],
+  ["journalName", "Journal and year"],
+  ["doi", "DOI"],
+  ["citations", "Citation count"],
+  ["legend", "Highlight legend"],
+];
 
 const ls = {
   get: (k: string) => {
@@ -26,7 +55,26 @@ const ls = {
   },
 };
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-const STYLES = ["marker", "bold", "underline", "box"];
+
+// One retry for network errors and server errors, with a timeout so a stalled request can't hang the UI.
+async function fetchRetry(url: string, ms = 28000) {
+  let last: unknown;
+  for (let i = 0; i < 2; i++) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), ms);
+    try {
+      const res = await fetch(url, { signal: ctl.signal });
+      if (res.status < 500) return res;
+      last = res;
+    } catch (e) {
+      last = e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (last instanceof Response) return last;
+  throw last;
+}
 
 function Seg<T extends string | number>({
   value,
@@ -53,34 +101,31 @@ function Seg<T extends string | number>({
 export default function App() {
   const [input, setInput] = useState("");
   const [paper, setPaper] = useState<Paper | null>(null);
+  const [journal, setJournal] = useState<JournalInfo | null>(null);
   const [status, setStatus] = useState<"idle" | "loading">("idle");
   const [error, setError] = useState("");
   const [marks, setMarks] = useState<Marks>({});
-  const [active, setActive] = useState<1 | 2>(1);
-  const [opts, setOpts] = useState<CardOpts>({
-    theme: "light",
-    layout: "card",
-    style: "marker",
-    affiliations: true,
-    meta: true,
-    logos: true,
-    legend: true,
-    labels: ["Highlighted", "Collaborators"],
-  });
+  const [active, setActive] = useState<G>(1);
+  const [opts, setOpts] = useState<CardOpts>(DEFAULTS);
+  const [ready, setReady] = useState(false);
   const [scale, setScale] = useState(2);
   const [me, setMe] = useState("");
   const [filter, setFilter] = useState("");
+  const [ifText, setIfText] = useState("");
+  const [qText, setQText] = useState("");
   const [toast, setToast] = useState("");
   const [recent, setRecent] = useState<{ doi: string; title: string }[]>([]);
+  const [stageW, setStageW] = useState(0);
   const cardRef = useRef<HTMLDivElement>(null);
-  const [journal, setJournal] = useState<JournalInfo | null>(null);
-  const [ifOverride, setIfOverride] = useState("");
-  const [qOverride, setQOverride] = useState("");
+  const stageRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const reqId = useRef(0);
+  const papers = useRef(new Map<string, Paper>());
+  const journals = useRef(new Map<string, JournalInfo>());
 
   const flash = (msg: string) => {
     setToast(msg);
-    setTimeout(() => setToast(""), 2200);
+    setTimeout(() => setToast(""), 2400);
   };
 
   const load = useCallback(async (raw: string, initial?: Marks) => {
@@ -89,41 +134,55 @@ export default function App() {
       setError("That doesn't look like a DOI. It should start with 10. (for example 10.1038/s41586-020-2649-2).");
       return;
     }
+    const id = ++reqId.current;
     setStatus("loading");
     setError("");
     try {
-      const res = await fetch(`/api/paper?doi=${encodeURIComponent(doi)}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Lookup failed. Try again in a moment.");
+      let data = papers.current.get(doi);
+      if (!data) {
+        const res = await fetchRetry(`/api/paper?doi=${encodeURIComponent(doi)}`);
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new ApiError(body.error ?? "Lookup failed. Try again in a moment.");
+        data = body as Paper;
+        papers.current.set(doi, data);
+      }
+      if (id !== reqId.current) return; // a newer lookup replaced this one
       setPaper(data);
       setMarks(initial ?? {});
-      // Journal details (metrics, logos) load after the card is already on screen.
-      const id = ++reqId.current;
-      setJournal(null);
+      setFilter("");
+      setRecent((r) => {
+        const next = [{ doi: data!.doi, title: data!.title }, ...r.filter((x) => x.doi !== data!.doi)].slice(0, 5);
+        ls.set("byline.recent", JSON.stringify(next));
+        return next;
+      });
+
+      // Logos load after the card is already on screen.
       const jp = new URLSearchParams();
       if (data.sourceId) jp.set("source", data.sourceId);
       if (data.issn) jp.set("issn", data.issn);
       if (data.publisher) jp.set("publisher", data.publisher);
-      if ([...jp].length) {
-        fetch(`/api/journal?${jp}`)
+      const jkey = jp.toString();
+      const cached = journals.current.get(jkey);
+      setJournal(cached ?? null);
+      if (jkey && !cached) {
+        fetchRetry(`/api/journal?${jkey}`)
           .then((r) => r.json())
-          .then((j) => id === reqId.current && setJournal(j))
+          .then((j: JournalInfo) => {
+            journals.current.set(jkey, j);
+            if (id === reqId.current) setJournal(j);
+          })
           .catch(() => {});
       }
-      setFilter("");
-      setRecent((r) => {
-        const next = [{ doi: data.doi, title: data.title }, ...r.filter((x) => x.doi !== data.doi)].slice(0, 5);
-        ls.set("byline.recent", JSON.stringify(next));
-        return next;
-      });
     } catch (e) {
-      setError((e as Error).message);
+      if (id === reqId.current) {
+        setError(e instanceof ApiError ? e.message : "Couldn't reach the server. Check your connection and try again.");
+      }
     } finally {
-      setStatus("idle");
+      if (id === reqId.current) setStatus("idle");
     }
   }, []);
 
-  // Restore saved name, history, and any state encoded in the URL.
+  // Restore saved preferences, history, and any state encoded in the URL.
   useEffect(() => {
     setMe(ls.get("byline.me") ?? "");
     try {
@@ -131,27 +190,44 @@ export default function App() {
     } catch {
       /* ignore */
     }
+    let saved: Partial<CardOpts> = {};
+    try {
+      saved = JSON.parse(ls.get("byline.opts") ?? "{}");
+    } catch {
+      /* ignore */
+    }
+    const base: CardOpts = {
+      ...DEFAULTS,
+      ...saved,
+      labels: Array.isArray(saved.labels) && saved.labels.length === 3 ? (saved.labels as CardOpts["labels"]) : DEFAULTS.labels,
+    };
     const p = new URLSearchParams(location.search);
-    const style = p.get("style") ?? "";
-    setOpts((o) => ({
-      ...o,
-      theme: p.get("theme") === "dark" ? "dark" : "light",
-      layout: p.get("layout") === "social" ? "social" : "card",
-      style: (STYLES.includes(style) ? style : "marker") as CardOpts["style"],
-    }));
+    const th = p.get("theme");
+    const ly = p.get("layout");
+    const st = p.get("style") ?? "";
+    if (th === "dark" || th === "light") base.theme = th;
+    if (ly === "social" || ly === "card") base.layout = ly;
+    if (STYLES.includes(st)) base.style = st as CardOpts["style"];
+    setOpts(base);
+    setReady(true);
+
     const doi = p.get("doi");
     if (doi) {
       setInput(doi);
+      setIfText(p.get("if") ?? "");
+      setQText(p.get("q") ?? "");
       const m: Marks = {};
       (p.get("hl") ?? "").split(",").forEach((t) => {
-        const [id, g] = t.split(".");
-        if (g === "1" || g === "2") m[+id] = +g as 1 | 2;
+        const [i, g] = t.split(".");
+        if (g === "1" || g === "2" || g === "3") m[+i] = +g as G;
       });
-      setIfOverride(p.get("if") ?? "");
-      setQOverride(p.get("q") ?? "");
       load(doi, m);
     }
   }, [load]);
+
+  useEffect(() => {
+    if (ready) ls.set("byline.opts", JSON.stringify(opts));
+  }, [opts, ready]);
 
   // Keep the URL shareable: it always reproduces the current paper, highlights and look.
   useEffect(() => {
@@ -159,10 +235,33 @@ export default function App() {
     const p = new URLSearchParams({ doi: paper.doi, theme: opts.theme, layout: opts.layout, style: opts.style });
     const hl = Object.entries(marks).map(([i, g]) => `${i}.${g}`).join(",");
     if (hl) p.set("hl", hl);
-    if (ifOverride.trim()) p.set("if", ifOverride.trim());
-    if (qOverride.trim()) p.set("q", qOverride.trim());
+    if (ifText.trim()) p.set("if", ifText.trim());
+    if (qText.trim()) p.set("q", qText.trim());
     history.replaceState(null, "", `?${p}`);
-  }, [paper, marks, opts.theme, opts.layout, opts.style, ifOverride, qOverride]);
+  }, [paper, marks, opts.theme, opts.layout, opts.style, ifText, qText]);
+
+  // "/" jumps to the DOI field.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (e.key === "/" && !/^(INPUT|TEXTAREA)$/.test(t.tagName)) {
+        e.preventDefault();
+        inputRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Fit the social preview to the available width, so it is scaled rather than cut off.
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setStageW(el.clientWidth));
+    ro.observe(el);
+    setStageW(el.clientWidth);
+    return () => ro.disconnect();
+  }, [paper]);
 
   const toggle = (id: number) =>
     setMarks((m) => {
@@ -186,6 +285,13 @@ export default function App() {
     const f = filter.toLowerCase();
     return authors.filter((a) => `${a.fullName} ${a.affiliations.join(" ")}`.toLowerCase().includes(f));
   }, [authors, filter]);
+
+  // Impact factor and quartile are licensed data, so they are typed in rather than looked up.
+  const q = qText.trim().toUpperCase();
+  const metrics = {
+    impact: ifText.trim() ? `Impact factor ${ifText.trim()}` : undefined,
+    q: q ? (/^[1-4]$/.test(q) ? `Q${q}` : q) : undefined,
+  };
 
   async function capture(kind: "png" | "jpeg" | "blob"): Promise<string | Blob> {
     const node = cardRef.current;
@@ -246,104 +352,86 @@ export default function App() {
     }
   }
 
-  // Impact factor and quartile are licensed data, so they are typed in rather than looked up.
-  const qText = qOverride.trim().toUpperCase();
-  const metrics = {
-    impact: ifOverride.trim() ? `Impact factor ${ifOverride.trim()}` : undefined,
-    q: qText ? (/^[1-4]$/.test(qText) ? `Q${qText}` : qText) : undefined,
-  };
-
   const go = (doi: string) => {
     setInput(doi);
     load(doi);
   };
 
+  const social = opts.layout === "social";
+  const fit = social && stageW ? Math.min(1, (stageW - 8) / 1200) : 1;
+  const card = <PaperCard paper={paper!} marks={marks} opts={opts} journal={journal} metrics={metrics} innerRef={cardRef} />;
+
   return (
     <main className="wrap">
-      <h1 className="brand">Byline</h1>
-      <p className="lede">Paste a DOI, highlight the authors that matter, and save the result as an image.</p>
-
-      <form
-        className="search"
-        onSubmit={(e) => {
-          e.preventDefault();
-          load(input);
-        }}
-      >
-        <input
-          type="text"
-          aria-label="DOI"
-          placeholder="10.1038/s41586-020-2649-2 or https://doi.org/…"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          autoFocus
-        />
-        <button className="primary" disabled={status === "loading" || !input.trim()}>
-          {status === "loading" ? "Looking up…" : "Find paper"}
-        </button>
-      </form>
+      <header className="top">
+        <h1 className="brand">Byline</h1>
+        <form
+          className="search"
+          onSubmit={(e) => {
+            e.preventDefault();
+            load(input);
+          }}
+        >
+          <input
+            ref={inputRef}
+            type="text"
+            aria-label="DOI"
+            placeholder="Paste a DOI or doi.org link   ( / )"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            autoFocus
+          />
+          <button className="primary" disabled={status === "loading" || !input.trim()}>
+            {status === "loading" ? "Looking up…" : "Find paper"}
+          </button>
+        </form>
+      </header>
       {error && (
         <p className="err" role="alert">
           {error}
         </p>
       )}
       {!paper && (
-        <p className="try">
-          Try
-          <button type="button" onClick={() => go("10.1038/171737a0")}>
-            Watson and Crick, 1953
-          </button>
-          or
-          <button type="button" onClick={() => go("10.1038/s41586-020-2649-2")}>
-            NumPy, 2020
-          </button>
-          {recent.map((r) => (
-            <button type="button" key={r.doi} onClick={() => go(r.doi)} title={r.title}>
-              {r.doi}
-            </button>
-          ))}
-        </p>
+        <div className="empty">
+          <p className="lede">Highlight the authors that matter on any paper, then save the result as an image.</p>
+          <p className="try">
+            Try
+            <button type="button" onClick={() => go("10.1038/171737a0")}>Watson and Crick, 1953</button>
+            or
+            <button type="button" onClick={() => go("10.1038/s41586-020-2649-2")}>NumPy, 2020</button>
+            {recent.map((r) => (
+              <button type="button" key={r.doi} onClick={() => go(r.doi)} title={r.title}>
+                {r.doi}
+              </button>
+            ))}
+          </p>
+        </div>
       )}
 
       {paper && (
         <div className="grid">
-          <aside className="stack">
+          <aside>
             <div className="panel">
               <h3>Highlight</h3>
-              {([1, 2] as const).map((g) => (
+              {GROUPS.map((g) => (
                 <div className="row group" key={g}>
-                  <button
-                    type="button"
-                    className={`pick g${g}`}
-                    aria-pressed={active === g}
-                    aria-label={`Use group ${g}`}
-                    onClick={() => setActive(g)}
-                  />
+                  <button type="button" className={`pick g${g}`} aria-pressed={active === g} aria-label={`Use ${opts.labels[g - 1]}`} onClick={() => setActive(g)} />
                   <input
                     type="text"
-                    aria-label={`Label for group ${g}`}
+                    aria-label={`Name of color ${g}`}
                     value={opts.labels[g - 1]}
                     onChange={(e) =>
-                      setOpts((o) => ({
-                        ...o,
-                        labels: g === 1 ? [e.target.value, o.labels[1]] : [o.labels[0], e.target.value],
-                      }))
+                      setOpts((o) => ({ ...o, labels: o.labels.map((l, i) => (i === g - 1 ? e.target.value : l)) as CardOpts["labels"] }))
                     }
                   />
                 </div>
               ))}
-              <p className="hint">Click authors below to mark them with the selected group.</p>
+              <p className="hint">Pick a color, then click authors in the list to mark them.</p>
               <div className="row">
-                <button type="button" onClick={() => preset(authors.slice(0, 1).map((a) => a.id), "")}>First author</button>
-                <button type="button" onClick={() => preset(authors.length > 1 ? [authors[authors.length - 1].id] : [], "Only one author")}>
-                  Last author
-                </button>
-                <button type="button" onClick={() => preset(authors.filter((a) => a.isCorresponding).map((a) => a.id), "No corresponding author listed")}>
-                  Corresponding
-                </button>
-                <button type="button" onClick={() => setMarks({})} disabled={!Object.keys(marks).length}>
-                  Clear
-                </button>
+                <button type="button" onClick={() => preset(authors.slice(0, 1).map((a) => a.id), "")}>First</button>
+                <button type="button" onClick={() => preset(authors.length > 1 ? [authors[authors.length - 1].id] : [], "Only one author")}>Last</button>
+                <button type="button" onClick={() => preset(authors.filter((a) => a.isCorresponding).map((a) => a.id), "No corresponding author listed")}>Corresponding</button>
+                <button type="button" onClick={() => setMarks({})} disabled={!Object.keys(marks).length}>Clear</button>
               </div>
               <div className="row me">
                 <input
@@ -356,18 +444,14 @@ export default function App() {
                     ls.set("byline.me", e.target.value);
                   }}
                 />
-                <button
-                  type="button"
-                  disabled={!me.trim()}
-                  onClick={() => preset(authors.filter((a) => matchesName(a, me)).map((a) => a.id), "No author matches that name")}
-                >
+                <button type="button" disabled={!me.trim()} onClick={() => preset(authors.filter((a) => matchesName(a, me)).map((a) => a.id), "No author matches that name")}>
                   Highlight me
                 </button>
               </div>
             </div>
 
             <div className="panel">
-              <h3>Look</h3>
+              <h3>Card</h3>
               <div className="stack tight">
                 <Seg label="Highlight style" value={opts.style} onChange={(style) => setOpts((o) => ({ ...o, style }))}
                   options={[["marker", "Marker"], ["bold", "Bold"], ["underline", "Underline"], ["box", "Box"]]} />
@@ -375,31 +459,19 @@ export default function App() {
                   options={[["light", "Light"], ["dark", "Dark"]]} />
                 <Seg label="Layout" value={opts.layout} onChange={(layout) => setOpts((o) => ({ ...o, layout }))}
                   options={[["card", "Card"], ["social", "Social 1200×630"]]} />
-                <label className="check">
-                  <input type="checkbox" checked={opts.affiliations} onChange={(e) => setOpts((o) => ({ ...o, affiliations: e.target.checked }))} />
-                  Show full affiliations
-                </label>
-                <label className="check">
-                  <input type="checkbox" checked={opts.meta} onChange={(e) => setOpts((o) => ({ ...o, meta: e.target.checked }))} />
-                  Show journal, year and DOI
-                </label>
-                <label className="check">
-                  <input type="checkbox" checked={opts.legend} onChange={(e) => setOpts((o) => ({ ...o, legend: e.target.checked }))} />
-                  Show highlight legend
-                </label>
-              </div>
-            </div>
-
-            <div className="panel">
-              <h3>Journal</h3>
-              <div className="stack tight">
-                <label className="check">
-                  <input type="checkbox" checked={opts.logos} onChange={(e) => setOpts((o) => ({ ...o, logos: e.target.checked }))} />
-                  Show publisher and journal logos
-                </label>
-                <input type="text" inputMode="decimal" aria-label="Impact factor" placeholder="Impact factor, e.g. 64.8" value={ifOverride} onChange={(e) => setIfOverride(e.target.value)} />
-                <input type="text" aria-label="Quartile" placeholder="Quartile, e.g. Q1" maxLength={6} value={qOverride} onChange={(e) => setQOverride(e.target.value)} />
-                <p className="hint">Leave a field empty to hide it on the card.</p>
+                <div className="checks">
+                  {SHOW.map(([k, text]) => (
+                    <label className="check" key={k}>
+                      <input type="checkbox" checked={opts[k]} onChange={(e) => setOpts((o) => ({ ...o, [k]: e.target.checked }))} />
+                      {text}
+                    </label>
+                  ))}
+                </div>
+                <div className="row two">
+                  <input type="text" inputMode="decimal" aria-label="Impact factor" placeholder="Impact factor" value={ifText} onChange={(e) => setIfText(e.target.value)} />
+                  <input type="text" aria-label="Quartile" placeholder="Quartile, e.g. Q1" maxLength={6} value={qText} onChange={(e) => setQText(e.target.value)} />
+                </div>
+                <p className="hint">Impact factor and quartile are licensed data, so type them in. Empty fields stay off the card.</p>
               </div>
             </div>
 
@@ -419,9 +491,15 @@ export default function App() {
             </div>
           </aside>
 
-          <section>
-            <div className="stage">
-              <PaperCard paper={paper} marks={marks} opts={opts} journal={journal} metrics={metrics} innerRef={cardRef} />
+          <section className="preview">
+            <div className="stage" ref={stageRef}>
+              {social ? (
+                <div className="frame" style={{ width: 1200 * fit, height: 630 * fit }}>
+                  <div style={{ width: 1200, transform: `scale(${fit})`, transformOrigin: "top left" }}>{card}</div>
+                </div>
+              ) : (
+                <div className="frame" style={{ width: "min(720px, 100%)" }}>{card}</div>
+              )}
             </div>
             <div className="bar">
               <button className="primary" onClick={() => download("png")}>Download PNG</button>
@@ -432,9 +510,7 @@ export default function App() {
               <Seg label="Image scale" value={scale} onChange={setScale} options={[[1, "1x"], [2, "2x"], [3, "3x"]]} />
             </div>
             <p className="src">
-              Data from {paper.source}
-              {" "}
-              (<a href={paper.url} target="_blank" rel="noreferrer">open paper</a>).
+              Data from {paper.source} (<a href={paper.url} target="_blank" rel="noreferrer">open paper</a>)
             </p>
           </section>
         </div>

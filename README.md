@@ -6,7 +6,7 @@ Paste a DOI, highlight the authors that matter, and save the result as an image.
 
 - DOI input accepting `10.x/y`, `doi:…` and `doi.org` URLs
 - Metadata merged from Crossref and OpenAlex (affiliations, ORCIDs, corresponding authors), with DataCite as a fallback
-- Two highlight groups with editable legend labels
+- Three named highlight groups (rename them; the legend can be hidden)
 - Presets: first author, last author, corresponding author, and "Highlight me" (fuzzy name match, remembered in your browser)
 - Highlight styles: marker, bold, underline, box
 - Light and dark themes; card and 1200×630 social layouts
@@ -15,7 +15,8 @@ Paste a DOI, highlight the authors that matter, and save the result as an image.
 - Full affiliations (the complete text from the paper, not just institution names)
 - Publisher and journal logos, loaded after the card appears
 - Impact factor and quartile you type in, shown as chips on the card
-- Highlight legend can be switched off
+- Per-item toggles for affiliations, logos, journal, DOI, citation count and legend; your look settings are remembered
+- The social card shrinks its text to fit instead of cropping
 - Long author lists (over 24) collapse to the first 8, the last 4, and anyone highlighted
 
 ## Run locally

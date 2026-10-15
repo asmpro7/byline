@@ -7,21 +7,26 @@ type Raw = { given?: string; family?: string; name?: string; orcid?: string; aff
 
 const mailto = process.env.CONTACT_EMAIL;
 
-export async function getJson(url: string): Promise<J | null> {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 8000);
-  try {
-    const res = await fetch(url, {
-      signal: ctl.signal,
-      headers: { "User-Agent": `byline-app${mailto ? ` (mailto:${mailto})` : ""}` },
-      next: { revalidate: 86400 },
-    });
-    return res.ok ? await res.json() : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
+export async function getJson(url: string, tries = 2): Promise<J | null> {
+  for (let i = 0; i < tries; i++) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 6000);
+    try {
+      const res = await fetch(url, {
+        signal: ctl.signal,
+        headers: { "User-Agent": `byline-app${mailto ? ` (mailto:${mailto})` : ""}` },
+        next: { revalidate: 86400 },
+      });
+      if (res.ok) return await res.json();
+      if (res.status < 500 && res.status !== 429) return null; // definitive answer, don't retry
+    } catch {
+      /* timeout or network error: retry */
+    } finally {
+      clearTimeout(timer);
+    }
+    if (i < tries - 1) await new Promise((r) => setTimeout(r, 400));
   }
+  return null;
 }
 
 const len = (x: string[] = []) => x.join("").length;
